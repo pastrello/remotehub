@@ -1,3 +1,4 @@
+mod rdp;
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use base64::{engine::general_purpose::STANDARD, Engine};
 use parking_lot::Mutex;
@@ -99,11 +100,19 @@ fn rdp_preflight(state: tauri::State<'_, AppState>, profile_id: String) -> Resul
    "TCP acessível. NLA, autenticação e desktop remoto ainda não implementados.".into()
  }else{"TCP indisponível. Verifique firewall, destino e RDP.".into()}})
 }
+#[tauri::command]
+fn rdp_negotiate(state: tauri::State<'_, AppState>, profile_id: String) -> Result<rdp::NegotiationResult,String> {
+    let (protocol,host,port):(String,String,u16)=state.db.lock()
+      .query_row("SELECT protocol,host,port FROM profiles WHERE id=?1",params![profile_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))
+      .map_err(|e|e.to_string())?;
+    if protocol != "rdp" {return Err("Perfil não é RDP".into());}
+    rdp::probe(&host,port)
+}
 fn main(){
  tauri::Builder::default().setup(|app|{
     let mut dir=app.path().app_data_dir()?;std::fs::create_dir_all(&dir)?;dir.push("profiles.sqlite3");
     let conn=Connection::open(dir)?;
     conn.execute_batch("PRAGMA journal_mode=WAL;CREATE TABLE IF NOT EXISTS profiles (id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL CHECK(protocol IN ('ssh','rdp')),host TEXT NOT NULL,port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535),username TEXT NOT NULL DEFAULT '',folder TEXT NOT NULL DEFAULT 'Geral');")?;
     app.manage(AppState{db:Mutex::new(conn),ssh:Arc::new(Mutex::new(HashMap::new()))});Ok(())
- }).invoke_handler(tauri::generate_handler![profiles_list,profiles_save,profiles_delete,ssh_open,ssh_write,ssh_resize,ssh_close,rdp_preflight]).run(tauri::generate_context!()).expect("Erro ao executar RemoteHub");
+ }).invoke_handler(tauri::generate_handler![profiles_list,profiles_save,profiles_delete,ssh_open,ssh_write,ssh_resize,ssh_close,rdp_preflight,rdp_negotiate]).run(tauri::generate_context!()).expect("Erro ao executar RemoteHub");
 }
