@@ -1,5 +1,5 @@
-mod rdp;
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod rdp;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
