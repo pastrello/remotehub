@@ -22,3 +22,24 @@ References: https://github.com/Devolutions/IronRDP and https://docs.rs/ironrdp-c
 5. User sees explicit notice that graphics/NLA are not implemented.
 
 **Not yet validated on Windows:** Build, RDP preflight and SSH regression. Please run `git pull origin develop`, `npm run build`, `cargo check --manifest-path src-tauri/Cargo.toml` and `npm run tauri dev`.
+
+## Stage 2 — X.224 RDP security negotiation (2026-10-14)
+
+Implemented in `src-tauri/src/rdp.rs` with command `rdp_negotiate`.
+Sends one RDP_NEG_REQ (TLS, HYBRID, HYBRID_EX), validates bounded TPKT/X.224 confirmation and decodes RDP_NEG_RSP or failure. No credentials are transmitted; the connection closes after the response. Three Rust unit tests cover NLA response, negotiation failure and malformed PDU.
+
+**Not implemented:** TLS handshake, certificate verification, CredSSP/NLA exchange, RDP authentication, graphics, mouse or keyboard.
+
+Manual test on Windows:
+
+```cmd
+cd /d C:\software\RemoteHub\remotehub
+git pull origin develop
+cargo test --manifest-path src-tauri\Cargo.toml
+npm run build
+npm run tauri dev
+```
+
+Create an RDP profile for a lab Windows Server with RDP enabled and observe an X.224 result such as `CredSSP/NLA selecionado`. An accessible port alone is NOT an authenticated RDP session. Keep the SSH regression test with two tabs.
+
+Future task: integrate IronRDP 0.17 session/connector and a bounded pixel pipeline into the tab. Do not enable an insecure certificate bypass or hardcode credentials.
