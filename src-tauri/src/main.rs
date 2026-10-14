@@ -4,7 +4,7 @@ use parking_lot::Mutex;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, io::{Read, Write}, sync::Arc};
+use std::{collections::HashMap, io::{Read, Write}, net::{TcpStream, ToSocketAddrs}, sync::Arc, time::Duration};
 use tauri::{Emitter, Manager};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -78,11 +78,32 @@ fn ssh_close(state:tauri::State<'_,AppState>,id:String)->Result<(),String>{
  if let Some(mut session)=state.ssh.lock().remove(&id){session.child.kill().map_err(|e|e.to_string())?;}
  Ok(())
 }
+// Phase Zero RDP milestone: TCP preflight only. No credentials, no protocol login.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RdpPreflight { address: String, tcp_reachable: bool, note: String }
+#[tauri::command]
+fn rdp_preflight(state: tauri::State<'_, AppState>, profile_id: String) -> Result<RdpPreflight,String> {
+ let (protocol,host,port):(String,String,u16)=state.db.lock()
+   .query_row("SELECT protocol,host,port FROM profiles WHERE id=?1",params![profile_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))
+   .map_err(|e|e.to_string())?;
+ if protocol != "rdp" { return Err("Este perfil não utiliza RDP".into()); }
+ if host.trim().is_empty() || host.chars().any(|c| c.is_control() || c.is_whitespace()) || port == 0 {
+   return Err("Endereço ou porta inválida".into());
+ }
+ let addr=if host.contains(':') && !host.starts_with('['){format!("[{host}]:{port}")}else{format!("{host}:{port}")};
+ let targets=addr.to_socket_addrs().map_err(|e|format!("Falha ao resolver host: {e}"))?;
+ let mut reachable=false;
+ for target in targets.take(4) {if TcpStream::connect_timeout(&target,Duration::from_secs(2)).is_ok(){reachable=true;break;}}
+ Ok(RdpPreflight{address:addr,tcp_reachable:reachable,note:if reachable{
+   "TCP acessível. NLA, autenticação e desktop remoto ainda não implementados.".into()
+ }else{"TCP indisponível. Verifique firewall, destino e RDP.".into()}})
+}
 fn main(){
  tauri::Builder::default().setup(|app|{
     let mut dir=app.path().app_data_dir()?;std::fs::create_dir_all(&dir)?;dir.push("profiles.sqlite3");
     let conn=Connection::open(dir)?;
     conn.execute_batch("PRAGMA journal_mode=WAL;CREATE TABLE IF NOT EXISTS profiles (id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL CHECK(protocol IN ('ssh','rdp')),host TEXT NOT NULL,port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535),username TEXT NOT NULL DEFAULT '',folder TEXT NOT NULL DEFAULT 'Geral');")?;
     app.manage(AppState{db:Mutex::new(conn),ssh:Arc::new(Mutex::new(HashMap::new()))});Ok(())
- }).invoke_handler(tauri::generate_handler![profiles_list,profiles_save,profiles_delete,ssh_open,ssh_write,ssh_resize,ssh_close]).run(tauri::generate_context!()).expect("Erro ao executar RemoteHub");
+ }).invoke_handler(tauri::generate_handler![profiles_list,profiles_save,profiles_delete,ssh_open,ssh_write,ssh_resize,ssh_close,rdp_preflight]).run(tauri::generate_context!()).expect("Erro ao executar RemoteHub");
 }
