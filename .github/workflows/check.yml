@@ -18,3 +18,5 @@ jobs:
         run: npm run build
       - name: Check Rust
         run: cargo check --manifest-path src-tauri/Cargo.toml
+      - name: Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
