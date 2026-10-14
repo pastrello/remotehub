@@ -59,8 +59,8 @@ fn parse_confirm(packet: &[u8]) -> Result<String, String> {
             0 => Ok("RDP Standard (sem TLS/NLA selecionado)".into()),
             1 => Ok("TLS selecionado".into()),
             2 => Ok("CredSSP/NLA selecionado".into()),
-            4 => Ok("CredSSP/NLA estendido selecionado".into()),
-            8 => Ok("RDS AAD selecionado".into()),
+            4 => Ok("RDSTLS selecionado (protocolo de segurança específico de RDS)".into()),
+            8 => Ok("CredSSP/NLA HYBRID_EX selecionado".into()),
             _ => Err(format!("Protocolo negociado desconhecido: {code} (flags={flags})")),
         },
         3 => Err(format!("Servidor recusou a negociação de segurança (código {code})")),
@@ -119,6 +119,11 @@ mod tests {
     fn selected_tls_is_accepted() {
         let packet=[3,0,0,19,14,0xd0,0,0,0,0,0,2,1,8,0,1,0,0,0];
         assert_eq!(parse_confirm(&packet).unwrap(),"TLS selecionado");
+    }
+    #[test]
+    fn hybrid_ex_selected_protocol_8() {
+        let packet=[3,0,0,19,14,0xd0,0,0,0,0,0,2,0,8,0,8,0,0,0];
+        assert_eq!(parse_confirm(&packet).unwrap(),"CredSSP/NLA HYBRID_EX selecionado");
     }
     #[test]
     fn unexpected_negotiation_bytes_reported() {
