@@ -20,29 +20,55 @@ fn parse_confirm(packet: &[u8]) -> Result<String, String> {
     if packet.len() < 11 || packet[0] != 3 || packet[1] != 0 {
         return Err("TPKT RDP inválido".into());
     }
-    let len = u16::from_be_bytes([packet[2],packet[3]]) as usize;
-    if len != packet.len() || len > 4096 {return Err("Comprimento TPKT inválido".into());}
-    if packet[5] != 0xd0 {return Err("Resposta não é X.224 Connection Confirm".into());}
-    // Servers may return an X.224 CC without an RDP_NEG_RSP: do not treat as secure negotiation.
-    if packet.len() == 11 {return Ok("X.224 confirmado; protocolo de segurança não informado".into());}
-    if packet.len() < 19 {return Err("Negociação RDP incompleta".into());}
-    let tail = &packet[packet.len()-8..];
-    if tail[1] != 0 || u16::from_le_bytes([tail[2],tail[3]]) != 8 {
-        return Err("Estrutura RDP_NEG_RSP inválida".into());
+    let length = u16::from_be_bytes([packet[2], packet[3]]) as usize;
+    if length != packet.len() || length > 4096 {
+        return Err("Comprimento TPKT inválido".into());
     }
-    let code = u32::from_le_bytes([tail[4],tail[5],tail[6],tail[7]]);
-    match tail[0] {
+    let x224_length = packet[4] as usize;
+    if x224_length < 6 || x224_length + 5 != packet.len() {
+        return Err(format!("Comprimento X.224 inesperado: LI={x224_length}, TPKT={length}"));
+    }
+    if packet[5] != 0xd0 {
+        return Err("Resposta não é X.224 Connection Confirm".into());
+    }
+    // X.224 CC fixed portion: LI(1), type(1), DST-REF(2), SRC-REF(2), CLASS(1).
+    // RDP_NEG_RSP or RDP_NEG_FAILURE follows at offset 11, not necessarily at
+    // the last 8 bytes of an arbitrary packet.
+    if packet.len() == 11 {
+        return Ok("X.224 confirmado; protocolo de segurança não informado".into());
+    }
+    let data = &packet[11..];
+    if data.len() != 8 {
+        return Err(format!(
+            "Dados de negociação RDP inesperados ({} bytes; início: {})",
+            data.len(),
+            hex_prefix(data, 16)
+        ));
+    }
+    let flags = data[1];
+    let field_length = u16::from_le_bytes([data[2], data[3]]);
+    if field_length != 8 {
+        return Err(format!(
+            "RDP_NEG_RSP com comprimento inválido ({field_length}); bytes: {}",
+            hex_prefix(data, 8)
+        ));
+    }
+    let code = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+    match data[0] {
         2 => match code {
             0 => Ok("RDP Standard (sem TLS/NLA selecionado)".into()),
             1 => Ok("TLS selecionado".into()),
             2 => Ok("CredSSP/NLA selecionado".into()),
             4 => Ok("CredSSP/NLA estendido selecionado".into()),
             8 => Ok("RDS AAD selecionado".into()),
-            _ => Err(format!("Protocolo negociado desconhecido: {code}")),
+            _ => Err(format!("Protocolo negociado desconhecido: {code} (flags={flags})")),
         },
         3 => Err(format!("Servidor recusou a negociação de segurança (código {code})")),
-        _ => Err("Resposta de negociação desconhecida".into()),
+        kind => Err(format!("Tipo de negociação desconhecido: {kind}; bytes: {}",hex_prefix(data,8))),
     }
+}
+fn hex_prefix(bytes: &[u8], limit: usize) -> String {
+    bytes.iter().take(limit).map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
 }
 
 pub fn probe(host: &str, port: u16) -> Result<NegotiationResult,String> {
@@ -88,6 +114,16 @@ mod tests {
     fn negotiation_failure_is_not_success() {
         let packet=[3,0,0,19,14,0xd0,0,0,0,0,0,3,0,8,0,2,0,0,0];
         assert!(parse_confirm(&packet).is_err());
+    }
+    #[test]
+    fn selected_tls_is_accepted() {
+        let packet=[3,0,0,19,14,0xd0,0,0,0,0,0,2,1,8,0,1,0,0,0];
+        assert_eq!(parse_confirm(&packet).unwrap(),"TLS selecionado");
+    }
+    #[test]
+    fn unexpected_negotiation_bytes_reported() {
+        let packet=[3,0,0,19,14,0xd0,0,0,0,0,0,2,0,0,0,2,0,0,0];
+        assert!(parse_confirm(&packet).unwrap_err().contains("02 00 00 00"));
     }
     #[test]
     fn malformed_packet_rejected() {assert!(parse_confirm(&[3,0,0,100,0]).is_err());}
