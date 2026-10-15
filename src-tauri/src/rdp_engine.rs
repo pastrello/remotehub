@@ -233,7 +233,9 @@ impl Engine {
                         ..SessionOutcome::default()
                     },
                 };
-                // Explicitly wait for the encoder to finish and release its bounded queue.
+                // Disconnect the bounded queue BEFORE joining the encoder worker.
+                // Without this drop, recv() waits forever and session teardown deadlocks.
+                drop(frame_tx);
                 if let Ok(worker) = worker { let _ = worker.join(); }
                 let was_closed = close_requested.load(Ordering::Acquire);
                 let (phase, message) = if was_closed {
