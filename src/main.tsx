@@ -12,7 +12,7 @@ function b64(s:string){return btoa(String.fromCharCode(...new TextEncoder().enco
 function unb64(s:string){return new TextDecoder().decode(Uint8Array.from(atob(s),c=>c.charCodeAt(0)))}
 function Shell({sid}:{sid:string}){const ref=useRef<HTMLDivElement>(null);useEffect(()=>{if(!ref.current)return;const term=new Terminal({cursorBlink:true,theme:{background:"#111827"}});const fit=new FitAddon();term.loadAddon(fit);term.open(ref.current);fit.fit();term.focus();const input=term.onData(data=>{invoke("ssh_write",{id:sid,data:b64(data)}).catch(console.error)});let active=true;const offs: Array<()=>void>=[];listen<{id:string,data:string}>("ssh-output",e=>{if(active&&e.payload.id===sid)term.write(unb64(e.payload.data))}).then(f=>{if(active)offs.push(f);else f()});listen<{id:string}>("ssh-closed",e=>{if(active&&e.payload.id===sid)term.writeln("\r\n[SSH encerrado]")}).then(f=>{if(active)offs.push(f);else f()});const resize=()=>{fit.fit();invoke("ssh_resize",{id:sid,rows:term.rows,cols:term.cols}).catch(()=>{})};window.addEventListener("resize",resize);return()=>{active=false;offs.forEach(f=>f());window.removeEventListener("resize",resize);input.dispose();term.dispose()};},[sid]);return <div className="terminal" ref={ref}/> }
 type RdpEvent={eventId:string;phase:string;status:string;terminal:boolean};
-type RdpFrame={eventId:string;sequence:number;width:number;height:number;jpegBase64:string};
+type RdpFrame={eventId:string;sequence:number;fullWidth:number;fullHeight:number;x:number;y:number;width:number;height:number;jpegBase64:string;jpegBytes:number;encodeMs:number;sentAtMs:number};
 type RdpInput=
   |{kind:"key";scancode:number;extended:boolean;pressed:boolean}
   |{kind:"mouse";action:"move"|"down"|"up"|"wheel";x:number;y:number;button:number;wheel:number};
@@ -67,8 +67,12 @@ const attemptRef=useRef("");
 const terminatedRef=useRef(false);
 const visibleRef=useRef(visible);
 const activeRef=useRef(true);
-const latestFrameRef=useRef<RdpFrame|null>(null);
-const drawingRef=useRef(false);
+const paintChainRef=useRef<Promise<void>>(Promise.resolve());
+const inputChainRef=useRef<Promise<void>>(Promise.resolve());
+const samplesRef=useRef<Array<{at:number;bytes:number;lag:number;encode:number}>>([]);
+const reportAtRef=useRef(0);
+const [telemetry,setTelemetry]=useState("");
+const [inputFailures,setInputFailures]=useState(0);
 const lastSequenceRef=useRef(0);
 const keysRef=useRef(new Set<string>());
 const lastMoveRef=useRef(0);
@@ -77,7 +81,22 @@ const buttonsRef=useRef(new Set<number>());
 function sendInput(input:RdpInput){
   const id=sessionRef.current;
   if(!id||!activeRef.current)return;
-  void invoke("rdp_input",{id,input}).catch(()=>{});
+  const transmit=()=>invoke("rdp_input",{id,input});
+  // Only pointer movement may be lost under pressure. Every key/button action
+  // is serialized and retried, preserving key-up/key-down ordering.
+  if(input.kind==="mouse"&&input.action==="move"){
+    void transmit().catch(()=>setInputFailures(n=>n+1));
+    return;
+  }
+  inputChainRef.current=inputChainRef.current.then(async()=>{
+    for(let attempt=0;attempt<3;attempt++){
+      if(!activeRef.current)return;
+      try{await transmit();return;}catch{
+        if(attempt<2)await new Promise(resolve=>setTimeout(resolve,15));
+      }
+    }
+    setInputFailures(n=>n+1);
+  }).catch(()=>setInputFailures(n=>n+1));
 }
 function releaseKeys(){
   for(const code of keysRef.current){
@@ -87,38 +106,64 @@ function releaseKeys(){
   keysRef.current.clear();
   buttonsRef.current.clear();
 }
-async function drawLatest(){
-  if(drawingRef.current||!visibleRef.current||!activeRef.current)return;
-  drawingRef.current=true;
-  try{
-    while(latestFrameRef.current&&visibleRef.current&&activeRef.current){
-      const frame=latestFrameRef.current;
-      latestFrameRef.current=null;
-      if(frame.eventId!==attemptRef.current||frame.sequence<=lastSequenceRef.current)continue;
-      const bytes=Uint8Array.from(atob(frame.jpegBase64),char=>char.charCodeAt(0));
-      const bitmap=await createImageBitmap(new Blob([bytes],{type:"image/jpeg"}));
-      if(!activeRef.current||frame.eventId!==attemptRef.current){bitmap.close();break;}
-      const canvas=canvasRef.current;
-      if(canvas){
-        if(canvas.width!==frame.width)canvas.width=frame.width;
-        if(canvas.height!==frame.height)canvas.height=frame.height;
-        canvas.getContext("2d",{alpha:false})?.drawImage(bitmap,0,0);
-        lastSequenceRef.current=frame.sequence;
-        setResolution(frame.width+" × "+frame.height);
-        setHasFrame(true);
-      }
-      bitmap.close();
-    }
-  }catch(_err){
-    setProgress("Erro ao decodificar frame gráfico recebido do IronRDP.");
-  }finally{
-    drawingRef.current=false;
+async function paintFrame(frame:RdpFrame){
+  if(!activeRef.current||frame.eventId!==attemptRef.current ||
+     frame.sequence<=lastSequenceRef.current)return;
+  const fullPatch=frame.x===0&&frame.y===0&&
+    frame.width===frame.fullWidth&&frame.height===frame.fullHeight;
+  if(frame.width<1||frame.height<1||frame.fullWidth>2560||frame.fullHeight>1600||
+     frame.x+frame.width>frame.fullWidth||frame.y+frame.height>frame.fullHeight)return;
+  // A missing delta is unsafe to skip: withhold ACK so Rust sends a full refresh.
+  if(lastSequenceRef.current>0&&frame.sequence!==lastSequenceRef.current+1&&!fullPatch){
+    setProgress("Falha de sequência gráfica; solicitando ressincronização.");
+    return;
   }
+  let bitmap:ImageBitmap|undefined;
+  try{
+    const bytes=Uint8Array.from(atob(frame.jpegBase64),char=>char.charCodeAt(0));
+    bitmap=await createImageBitmap(new Blob([bytes],{type:"image/jpeg"}));
+    if(!activeRef.current||frame.eventId!==attemptRef.current)return;
+    if(bitmap.width!==frame.width||bitmap.height!==frame.height)return;
+    const canvas=canvasRef.current;
+    if(!canvas)return;
+    if(canvas.width!==frame.fullWidth||canvas.height!==frame.fullHeight){
+      if(!fullPatch)return; // Wait for a complete framebuffer on resize.
+      canvas.width=frame.fullWidth;
+      canvas.height=frame.fullHeight;
+      lastSequenceRef.current=0;
+    }
+    const ctx=canvas.getContext("2d",{alpha:false});
+    if(!ctx)return;
+    ctx.drawImage(bitmap,frame.x,frame.y);
+    lastSequenceRef.current=frame.sequence;
+    setResolution(frame.fullWidth+" × "+frame.fullHeight);
+    if(!hasFrame)setHasFrame(true);
+    const now=Date.now();
+    const lag=Math.max(0,now-frame.sentAtMs);
+    const samples=samplesRef.current;
+    samples.push({at:now,bytes:frame.jpegBytes,lag,encode:frame.encodeMs});
+    while(samples.length&&samples[0].at<now-3000)samples.shift();
+    if(now-reportAtRef.current>700){
+      reportAtRef.current=now;
+      const count=Math.max(samples.length,1);
+      const seconds=Math.max(1,(now-samples[0].at)/1000);
+      const fps=(samples.length/seconds).toFixed(1);
+      const kbps=Math.round(samples.reduce((n,p)=>n+p.bytes,0)/1024/seconds);
+      const bridgeMs=Math.round(samples.reduce((n,p)=>n+p.lag,0)/count);
+      const encodeMs=Math.round(samples.reduce((n,p)=>n+p.encode,0)/count);
+      setTelemetry("Canvas "+fps+" FPS · JPEG "+kbps+" KiB/s · bridge "+bridgeMs+" ms · compressão "+encodeMs+" ms");
+    }
+    // ACK only after successful paint. Otherwise timeout forces a full refresh.
+    await invoke("rdp_frame_ack",{eventId:frame.eventId,sequence:frame.sequence}).catch(()=>{
+      setProgress("Falha ao confirmar atualização gráfica; aguardando ressincronização.");
+    });
+  }catch{
+    setProgress("Falha ao decodificar delta gráfico; aguardando ressincronização.");
+  }finally{bitmap?.close();}
 }
 useEffect(()=>{
   visibleRef.current=visible;
-  if(visible)void drawLatest();
-  else releaseKeys();
+  if(!visible)releaseKeys();
 },[visible]);
 useEffect(()=>{
   let alive=true;
@@ -139,8 +184,11 @@ useEffect(()=>{
     listen<RdpFrame>("rdp-frame",e=>{
       const frame=e.payload;
       if(!alive||frame.eventId!==attemptRef.current)return;
-      latestFrameRef.current=frame;
-      if(visibleRef.current)void drawLatest();
+      // Never overwrite a dirty region. ACK-driven flow control allows only one
+      // in-flight frame; the Promise chain preserves decode and paint ordering.
+      paintChainRef.current=paintChainRef.current.then(()=>paintFrame(frame)).catch(()=>{
+        setProgress("Falha na fila de renderização.");
+      });
     }),
   ]).then(unsubs=>{
     if(alive){offs.push(...unsubs);setListenerReady(true);}
@@ -167,7 +215,11 @@ async function connect(){
   attemptRef.current=attempt;
   terminatedRef.current=false;
   lastSequenceRef.current=0;
-  latestFrameRef.current=null;
+  paintChainRef.current=Promise.resolve();
+  samplesRef.current=[];
+  reportAtRef.current=0;
+  setTelemetry("");
+  setInputFailures(0);
   setHasFrame(false);setResolution("");
   canvasRef.current?.getContext("2d")?.clearRect(0,0,canvasRef.current.width,canvasRef.current.height);
   setBusy(true);setPhase("connecting");
@@ -258,6 +310,8 @@ return <section className="rdp-panel">
   </div>
   <div className="rdp-footer" role="status">
     <span>{progress}</span>
+    {telemetry&&<span className="muted">{telemetry}</span>}
+    {inputFailures>0&&<span style={{color:"#ffc47a"}}>Falhas de entrada: {inputFailures}</span>}
     <span className="muted">Clique no desktop para usar teclado e mouse. PoC: sem IME, clipboard ou redimensionamento remoto.</span>
   </div>
 </section>;
@@ -268,5 +322,5 @@ useEffect(()=>{refresh()},[]);
 async function save(e:React.FormEvent){e.preventDefault();try{await invoke("profiles_save",{input:{...form,id:form.id||null,port:Number(form.port)}});setForm({...empty,id:""});await refresh()}catch(e){setError(String(e))}}
 async function open(p:Profile){setError("");if(p.protocol==="rdp"){const id=crypto.randomUUID();setTabs(prev=>[...prev,{id,profile:p,rdpStatus:"Verificando conexão TCP..."}]);setActive(id);invoke<{address:string;security:string;note:string}>("rdp_negotiate",{profileId:p.id}).then(result=>setTabs(prev=>prev.map(t=>t.id===id?{...t,rdpStatus:result.security+" — "+result.note}:t))).catch(e=>setTabs(prev=>prev.map(t=>t.id===id?{...t,rdpStatus:String(e)}:t)));return}try{const sid=await invoke<string>("ssh_open",{profileId:p.id});const id=crypto.randomUUID();setTabs(prev=>[...prev,{id,profile:p,sid}]);setActive(id)}catch(e){setError(String(e))}}
 async function close(t:Tab){if(t.sid)await invoke("ssh_close",{id:t.sid}).catch(console.error);setTabs(prev=>prev.filter(x=>x.id!==t.id));if(active===t.id)setActive("")}
-return <div className="app"><aside className="sidebar"><h2>RemoteHub <small className="muted">0.0.4-dev</small></h2><p className="muted">SSH validado · RDP gráfico experimental</p><input placeholder="Buscar..." value={search} onChange={e=>setSearch(e.target.value)}/><h3>Conexões</h3>{profiles.filter(p=>(p.name+" "+p.host+" "+p.folder).toLowerCase().includes(search.toLowerCase())).map(p=><div key={p.id}><button className="item" onClick={()=>open(p)}>{p.protocol.toUpperCase()} · {p.name}<span className="muted"> ({p.host})</span></button><div className="row"><button onClick={()=>setForm({...p})}>Editar</button><button onClick={async()=>{if(confirm("Excluir perfil?")){await invoke("profiles_delete",{id:p.id});refresh()}}}>Excluir</button></div></div>)}<h3>{form.id?"Editar":"Nova"} conexão</h3><form className="form" onSubmit={save}><input required placeholder="Nome" value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/><select value={form.protocol} onChange={e=>setForm({...form,protocol:e.target.value,port:e.target.value==="rdp"?3389:22})}><option value="ssh">SSH</option><option value="rdp">RDP (IronRDP experimental)</option></select><input required placeholder="Host" value={form.host} onChange={e=>setForm({...form,host:e.target.value})}/><input required type="number" min="1" max="65535" value={form.port} onChange={e=>setForm({...form,port:Number(e.target.value)})}/><input placeholder="Usuário" value={form.username} onChange={e=>setForm({...form,username:e.target.value})}/><input placeholder="Pasta" value={form.folder} onChange={e=>setForm({...form,folder:e.target.value})}/><button type="submit">Salvar perfil</button></form></aside><main className="work"><div className="tabs">{tabs.map(t=><button className={"tab "+(active===t.id?"selected":"")} key={t.id} onClick={()=>setActive(t.id)}>{t.profile.name} <span onClick={e=>{e.stopPropagation();close(t)}}> ×</span></button>)}</div>{error&&<div className="banner">{error} <button onClick={()=>setError("")}>×</button></div>}{tabs.length===0&&<div className="empty">Selecione SSH para conectar ou RDP para testar acessibilidade TCP.</div>}{tabs.map(t=><div key={t.id} style={{display:active===t.id?"flex":"none",flex:1,minHeight:0}}>{t.sid?<Shell sid={t.sid}/>:<RdpPanel profile={t.profile} status={t.rdpStatus} visible={active===t.id}/>}</div>)}</main></div>}
+return <div className="app"><aside className="sidebar"><h2>RemoteHub <small className="muted">0.0.5-dev</small></h2><p className="muted">SSH validado · RDP otimização WAN</p><input placeholder="Buscar..." value={search} onChange={e=>setSearch(e.target.value)}/><h3>Conexões</h3>{profiles.filter(p=>(p.name+" "+p.host+" "+p.folder).toLowerCase().includes(search.toLowerCase())).map(p=><div key={p.id}><button className="item" onClick={()=>open(p)}>{p.protocol.toUpperCase()} · {p.name}<span className="muted"> ({p.host})</span></button><div className="row"><button onClick={()=>setForm({...p})}>Editar</button><button onClick={async()=>{if(confirm("Excluir perfil?")){await invoke("profiles_delete",{id:p.id});refresh()}}}>Excluir</button></div></div>)}<h3>{form.id?"Editar":"Nova"} conexão</h3><form className="form" onSubmit={save}><input required placeholder="Nome" value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/><select value={form.protocol} onChange={e=>setForm({...form,protocol:e.target.value,port:e.target.value==="rdp"?3389:22})}><option value="ssh">SSH</option><option value="rdp">RDP (IronRDP experimental)</option></select><input required placeholder="Host" value={form.host} onChange={e=>setForm({...form,host:e.target.value})}/><input required type="number" min="1" max="65535" value={form.port} onChange={e=>setForm({...form,port:Number(e.target.value)})}/><input placeholder="Usuário" value={form.username} onChange={e=>setForm({...form,username:e.target.value})}/><input placeholder="Pasta" value={form.folder} onChange={e=>setForm({...form,folder:e.target.value})}/><button type="submit">Salvar perfil</button></form></aside><main className="work"><div className="tabs">{tabs.map(t=><button className={"tab "+(active===t.id?"selected":"")} key={t.id} onClick={()=>setActive(t.id)}>{t.profile.name} <span onClick={e=>{e.stopPropagation();close(t)}}> ×</span></button>)}</div>{error&&<div className="banner">{error} <button onClick={()=>setError("")}>×</button></div>}{tabs.length===0&&<div className="empty">Selecione SSH para conectar ou RDP para testar acessibilidade TCP.</div>}{tabs.map(t=><div key={t.id} style={{display:active===t.id?"flex":"none",flex:1,minHeight:0}}>{t.sid?<Shell sid={t.sid}/>:<RdpPanel profile={t.profile} status={t.rdpStatus} visible={active===t.id}/>}</div>)}</main></div>}
 createRoot(document.getElementById("root")!).render(<App/>);
