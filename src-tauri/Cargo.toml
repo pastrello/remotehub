@@ -20,4 +20,4 @@ uuid = { version = "1", features = ["v4"] }
 # certificate checks by default, so rdp_engine.rs sets Strict validation.
 ironrdp = { git = "https://github.com/Devolutions/IronRDP", rev = "7b976a6965c96c76ff949313e174ea55dada8c44", default-features = false, features = ["client", "pdu", "rustls"] }
 ironrdp-tls = { git = "https://github.com/Devolutions/IronRDP", rev = "7b976a6965c96c76ff949313e174ea55dada8c44", features = ["rustls"] }
-tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
