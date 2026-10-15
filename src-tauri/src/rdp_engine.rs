@@ -1,5 +1,6 @@
 //! IronRDP session lifecycle with structured, non-secret status events.
-//! No framebuffer is sent to the WebView yet; strict TLS verification is mandatory.
+//! No framebuffer is sent to the WebView yet; strict TLS is the default.
+//! An explicit per-attempt opt-in can bypass certificate validation for lab servers.
 use ironrdp::client::{
     config::{ConfigBuilder, Destination},
     output_channel::output_channel,
@@ -39,6 +40,13 @@ fn failure_label(kind: &ConnectorErrorKind) -> &'static str {
         _ => "Falha RDP antes da confirmação do login (verifique certificado TLS, rede e credenciais)",
     }
 }
+fn certificate_policy(allow_invalid_certificate: bool) -> CertificateValidation {
+    if allow_invalid_certificate {
+        CertificateValidation::DangerouslyAcceptInvalidCertificate
+    } else {
+        CertificateValidation::Strict
+    }
+}
 fn notify(app: &AppHandle, event_id: &str, phase: &str, status: &str, terminal: bool) {
     let _ = app.emit("rdp-status", serde_json::json!({
         "eventId": event_id, "phase": phase, "status": status, "terminal": terminal
@@ -58,6 +66,7 @@ impl Engine {
         username: String,
         password: String,
         event_id: String,
+        allow_invalid_certificate: bool,
     ) -> Result<String, String> {
         if uuid::Uuid::parse_str(&event_id).is_err() {
             return Err("Identificador de aba RDP inválido".into());
@@ -75,7 +84,7 @@ impl Engine {
             format!("{host}:{port}")
         };
         let destination = Destination::new(address).map_err(|_| "Destino RDP inválido")?;
-        // Strict is NOT IronRDP's default. This is a deliberate security policy.
+        // Strict remains the default. Insecure mode requires per-attempt UI consent.
         let config = ConfigBuilder::new()
             .with_destination(destination)
             .with_username(username)
@@ -84,7 +93,7 @@ impl Engine {
             .with_client_dir("C:\\Windows\\System32\\mstscax.dll")
             .with_client_name("RemoteHub")
             .with_platform(MajorPlatformType::WINDOWS)
-            .with_certificate_validation(CertificateValidation::Strict)
+            .with_certificate_validation(certificate_policy(allow_invalid_certificate))
             .build()
             .map_err(|_| "Falha na configuração do cliente RDP")?;
 
@@ -103,7 +112,11 @@ impl Engine {
         let spawn_result = std::thread::Builder::new()
             .name("remotehub-rdp".into())
             .spawn(move || {
-                notify(&app, &event_id, "connecting", "Iniciando autenticação RDP com certificado TLS verificado", false);
+                notify(&app, &event_id, "connecting", if allow_invalid_certificate {
+                    "Iniciando RDP com validação do certificado DESATIVADA nesta tentativa"
+                } else {
+                    "Iniciando autenticação RDP com certificado TLS verificado"
+                }, false);
                 let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
                 let outcome = match rt {
                     Ok(rt) => rt.block_on(async {
@@ -181,6 +194,14 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn default_policy_is_strict_and_override_is_explicit() {
+        assert!(matches!(certificate_policy(false), CertificateValidation::Strict));
+        assert!(matches!(
+            certificate_policy(true),
+            CertificateValidation::DangerouslyAcceptInvalidCertificate
+        ));
+    }
     #[test]
     fn status_classification_never_echoes_passwords() {
         assert_eq!(failure_label(&ConnectorErrorKind::AccessDenied),"Acesso negado pelo servidor RDP");
