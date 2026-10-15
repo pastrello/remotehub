@@ -60,24 +60,28 @@ impl Engine {
                     .enable_all().build();
                 match rt {
                     Ok(rt) => rt.block_on(async {
-                        let task = tokio::spawn(client.run());
-                        let mut seen_image = false;
-                        while let Some(event) = output_rx.recv().await {
-                            let status = match event {
-                                RdpOutputEvent::Connected => Some("RDP conectado (ativação da sessão)"),
-                                RdpOutputEvent::LoginComplete => Some("Login RDP confirmado pelo servidor"),
-                                RdpOutputEvent::ConnectionFailure(_) => Some("Falha na negociação ou autenticação RDP; confira certificado e credenciais"),
-                                RdpOutputEvent::Image { .. } if !seen_image => {
-                                    seen_image = true;
-                                    Some("Frame RDP recebido; renderizador em desenvolvimento")
+                        // IronRDP's run() future is !Send in this revision.
+                        // Poll it and the event consumer concurrently on the SAME runtime
+                        // thread; do not use tokio::spawn() (which requires Send).
+                        let events = async {
+                            let mut seen_image = false;
+                            while let Some(event) = output_rx.recv().await {
+                                let status = match event {
+                                    RdpOutputEvent::Connected => Some("RDP conectado (ativação da sessão)"),
+                                    RdpOutputEvent::LoginComplete => Some("Login RDP confirmado pelo servidor"),
+                                    RdpOutputEvent::ConnectionFailure(_) => Some("Falha na negociação ou autenticação RDP; confira certificado e credenciais"),
+                                    RdpOutputEvent::Image { .. } if !seen_image => {
+                                        seen_image = true;
+                                        Some("Frame RDP recebido; renderizador em desenvolvimento")
+                                    }
+                                    _ => None
+                                };
+                                if let Some(status) = status {
+                                    let _ = app.emit("rdp-status", serde_json::json!({"id":sid,"status":status}));
                                 }
-                                _ => None
-                            };
-                            if let Some(status) = status {
-                                let _ = app.emit("rdp-status", serde_json::json!({"id":sid,"status":status}));
                             }
-                        }
-                        let _ = task.await;
+                        };
+                        tokio::join!(client.run(), events);
                     }),
                     Err(_) => {
                         let _ = app.emit("rdp-status", serde_json::json!({"id":sid,"status":"Falha ao iniciar runtime RDP"}));
