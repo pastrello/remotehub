@@ -2,6 +2,7 @@
 mod rdp;
 mod rdp_engine;
 mod rdp_frames;
+mod rdp_compositor;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
@@ -126,11 +127,15 @@ fn rdp_close(state: tauri::State<'_, AppState>, id:String) {
 fn rdp_input(state: tauri::State<'_, AppState>, id:String, input:rdp_engine::InputAction) -> Result<(),String> {
     state.rdp.send_input(&id,input)
 }
+#[tauri::command]
+fn rdp_frame_ack(state:tauri::State<'_,AppState>,event_id:String,sequence:u64)->Result<(),String>{
+    state.rdp.ack_frame(&event_id,sequence)
+}
 fn main(){
  tauri::Builder::default().setup(|app|{
     let mut dir=app.path().app_data_dir()?;std::fs::create_dir_all(&dir)?;dir.push("profiles.sqlite3");
     let conn=Connection::open(dir)?;
     conn.execute_batch("PRAGMA journal_mode=WAL;CREATE TABLE IF NOT EXISTS profiles (id TEXT PRIMARY KEY,name TEXT NOT NULL,protocol TEXT NOT NULL CHECK(protocol IN ('ssh','rdp')),host TEXT NOT NULL,port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535),username TEXT NOT NULL DEFAULT '',folder TEXT NOT NULL DEFAULT 'Geral');")?;
     app.manage(AppState{db:Mutex::new(conn),ssh:Arc::new(Mutex::new(HashMap::new())),rdp:rdp_engine::Engine::new()});Ok(())
- }).invoke_handler(tauri::generate_handler![profiles_list,profiles_save,profiles_delete,ssh_open,ssh_write,ssh_resize,ssh_close,rdp_preflight,rdp_negotiate,rdp_start,rdp_close,rdp_input]).run(tauri::generate_context!()).expect("Erro ao executar RemoteHub");
+ }).invoke_handler(tauri::generate_handler![profiles_list,profiles_save,profiles_delete,ssh_open,ssh_write,ssh_resize,ssh_close,rdp_preflight,rdp_negotiate,rdp_start,rdp_close,rdp_input,rdp_frame_ack]).run(tauri::generate_context!()).expect("Erro ao executar RemoteHub");
 }
