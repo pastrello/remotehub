@@ -1,5 +1,5 @@
 //! IronRDP session lifecycle with structured, non-secret status events.
-//! No framebuffer is sent to the WebView yet; strict TLS is the default.
+//! Full session with ordered dirty rectangles, compositor, and acknowledged JPEG deltas.
 //! An explicit per-attempt opt-in can bypass certificate validation for lab servers.
 use ironrdp::client::{
     config::{ConfigBuilder, Destination},
@@ -12,7 +12,9 @@ use ironrdp::pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
 use ironrdp::pdu::input::mouse::{MousePdu, PointerFlags};
 use serde::Deserialize;
 use smallvec::smallvec;
-use crate::rdp_frames::{RawFrame, MAX_FPS, MAX_PIXELS};
+use crate::rdp_frames::{FRAME_INTERVAL_MS, ACK_TIMEOUT_MS};
+use crate::rdp_compositor::{Compositor,Rect};
+use tokio::sync::mpsc;
 use ironrdp_tls::CertificateValidation;
 use parking_lot::Mutex;
 use std::{
@@ -69,6 +71,8 @@ fn to_fastpath(input: InputAction) -> Result<FastPathInputEvent, String> {
 
 struct SessionHandle {
     sender: RdpInputSender,
+    frame_ack: mpsc::Sender<u64>,
+    event_id: String,
     close_requested: Arc<AtomicBool>,
 }
 pub struct Engine {
@@ -149,12 +153,13 @@ impl Engine {
             .map_err(|_| "Falha na configuração do cliente RDP")?;
 
         let session_id = uuid::Uuid::new_v4().to_string();
-        let (output_tx, mut output_rx) = output_channel(16);
-        let client = RdpClient::new(config, output_tx);
+        let (output_tx, mut output_rx) = output_channel(64);
+        let client = RdpClient::new(config, output_tx).with_desktop_updates();
+        let (frame_ack, mut ack_rx) = mpsc::channel::<u64>(4);
         let sender = client.input_sender();
         let close_requested = Arc::new(AtomicBool::new(false));
         self.sessions.lock().insert(session_id.clone(), SessionHandle {
-            sender,
+            sender,frame_ack,event_id:event_id.clone(),
             close_requested: close_requested.clone(),
         });
 
@@ -180,47 +185,91 @@ impl Engine {
                         // RdpClient::run() is !Send in this pinned IronRDP revision.
                         // Drive it and its bounded event channel on the same thread.
                         let receive = async {
-                            let mut outcome = SessionOutcome::default();
-                            let mut last_frame=Instant::now() - Duration::from_secs(1);
-                            let mut frame_sequence=0_u64;
-                            while let Some(event) = output_rx.recv().await {
-                                match event {
-                                    RdpOutputEvent::Connected => {
-                                        outcome.activated = true;
-                                        notify(&app,&event_id,"activated","Conexão RDP ativada; aguardando confirmação de login",false);
-                                    }
-                                    RdpOutputEvent::LoginComplete => {
-                                        outcome.login_confirmed = true;
-                                        notify(&app,&event_id,"authenticated","Login RDP confirmado pelo servidor",false);
-                                    }
-                                    RdpOutputEvent::ConnectionFailure(err) => {
-                                        let label = failure_label(err.kind());
-                                        outcome.failure = Some(label);
-                                        notify(&app,&event_id,"failed",label,false);
-                                    }
-                                    RdpOutputEvent::Terminated(result) => {
-                                        if result.is_err() && outcome.failure.is_none() {
-                                            outcome.failure = Some("Transporte ou sessão RDP encerrado com erro");
+                            let mut outcome=SessionOutcome::default();
+                            let mut compositor=Compositor::default();
+                            let mut sequence=0_u64;
+                            let mut inflight:Option<(u64,Instant)>=None;
+                            let mut ticker=tokio::time::interval(Duration::from_millis(FRAME_INTERVAL_MS));
+                            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                            loop {
+                                tokio::select! {
+                                    event = output_rx.recv() => {
+                                        let Some(event)=event else {break;};
+                                        match event {
+                                            RdpOutputEvent::Connected=>{
+                                                outcome.activated=true;
+                                                notify(&app,&event_id,"activated","Conexão RDP ativada; aguardando confirmação de login",false);
+                                            }
+                                            RdpOutputEvent::LoginComplete=>{
+                                                outcome.login_confirmed=true;
+                                                notify(&app,&event_id,"authenticated","Login RDP confirmado pelo servidor",false);
+                                            }
+                                            RdpOutputEvent::ConnectionFailure(err)=>{
+                                                let label=failure_label(err.kind());
+                                                outcome.failure=Some(label);
+                                                notify(&app,&event_id,"failed",label,false);
+                                            }
+                                            RdpOutputEvent::Terminated(result)=>{
+                                                if result.is_err() && outcome.failure.is_none(){
+                                                    outcome.failure=Some("Transporte ou sessão RDP encerrado com erro");
+                                                }
+                                            }
+                                            RdpOutputEvent::DesktopUpdate(update)=>{
+                                                let (buffer,width,height,region)=update.into_parts();
+                                                let rect=Rect {
+                                                    x:region.left,y:region.top,
+                                                    width:region.right.saturating_sub(region.left).saturating_add(1),
+                                                    height:region.bottom.saturating_sub(region.top).saturating_add(1),
+                                                };
+                                                if compositor.apply(width.get(),height.get(),rect,&buffer).is_ok() {
+                                                    if !outcome.first_image {
+                                                        outcome.first_image=true;
+                                                        notify(&app,&event_id,"first_image","Primeira atualização gráfica recebida",false);
+                                                    }
+                                                }else{
+                                                    notify(&app,&event_id,"graphics_warning","Atualização gráfica rejeitada por dimensão inválida",false);
+                                                }
+                                            }
+                                            RdpOutputEvent::Image{buffer,width,height}=>{
+                                                // Fallback for server modes that send full images.
+                                                let rect=Rect{x:0,y:0,width:width.get(),height:height.get()};
+                                                let _=compositor.apply(width.get(),height.get(),rect,&buffer);
+                                                if !outcome.first_image{
+                                                    outcome.first_image=true;
+                                                    notify(&app,&event_id,"first_image","Primeiro framebuffer recebido",false);
+                                                }
+                                            }
+                                            _=>{}
                                         }
                                     }
-                                    RdpOutputEvent::Image {buffer,width,height} => {
-                                        if !outcome.first_image {
-                                            outcome.first_image = true;
-                                            notify(&app,&event_id,"first_image","Primeiro frame recebido; renderizando desktop",false);
-                                        }
-                                        // Rate limit and drop frames under encoder pressure rather than
-                                        // blocking the networking/event loop.
-                                        if last_frame.elapsed() >= Duration::from_millis(1000/MAX_FPS)
-                                           && buffer.len() <= MAX_PIXELS {
-                                            frame_sequence=frame_sequence.wrapping_add(1);
-                                            let _=frame_tx.try_send(RawFrame {
-                                                sequence:frame_sequence,width:width.get(),
-                                                height:height.get(),pixels:buffer
-                                            });
-                                            last_frame=Instant::now();
+                                    Some(ack) = ack_rx.recv() => {
+                                        if inflight.is_some_and(|(expected,_)| expected==ack) {
+                                            inflight=None;
                                         }
                                     }
-                                    _ => {}
+                                    _ = ticker.tick() => {
+                                        if inflight.is_some_and(|(_,instant)| instant.elapsed()>
+                                            Duration::from_millis(ACK_TIMEOUT_MS)) {
+                                            // A missing ACK must never lose desktop state.
+                                            // Force a complete resynchronization before next delta.
+                                            inflight=None;
+                                            compositor.mark_full();
+                                        }
+                                        if inflight.is_none() && compositor.has_dirty() {
+                                            sequence=sequence.wrapping_add(1);
+                                            if let Some(patch)=compositor.next_patch(sequence) {
+                                                let rect=Rect{
+                                                    x:patch.x,y:patch.y,width:patch.width,height:patch.height
+                                                };
+                                                if frame_tx.try_send(patch).is_ok(){
+                                                    inflight=Some((sequence,Instant::now()));
+                                                }else{
+                                                    // Re-merge the region with later updates, never discard deltas.
+                                                    compositor.restore_dirty(rect);
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             outcome
@@ -258,6 +307,14 @@ impl Engine {
             return Err("Falha ao iniciar o processamento da sessão RDP".into());
         }
         Ok(session_id)
+    }
+
+    pub fn ack_frame(&self,event_id:&str,sequence:u64)->Result<(),String>{
+        let sessions=self.sessions.lock();
+        let handle=sessions.values().find(|s|s.event_id==event_id)
+            .ok_or("Sessão RDP não encontrada")?;
+        handle.frame_ack.try_send(sequence)
+            .map_err(|_|"Fila de confirmação gráfica ocupada ou encerrada".into())
     }
 
     pub fn send_input(&self,id: &str,input: InputAction) -> Result<(),String> {
