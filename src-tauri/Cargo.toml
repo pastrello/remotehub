@@ -1,6 +1,6 @@
 [package]
 name = "remotehub"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2021"
 
 [build-dependencies]
@@ -21,3 +21,7 @@ uuid = { version = "1", features = ["v4"] }
 ironrdp = { git = "https://github.com/Devolutions/IronRDP", rev = "7b976a6965c96c76ff949313e174ea55dada8c44", default-features = false, features = ["client", "pdu", "connector", "rustls"] }
 ironrdp-tls = { git = "https://github.com/Devolutions/IronRDP", rev = "7b976a6965c96c76ff949313e174ea55dada8c44", features = ["rustls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+
+# Bounded JPEG encoding for first canvas proof-of-concept.
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+smallvec = "1.13"
