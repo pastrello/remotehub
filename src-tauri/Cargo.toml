@@ -1,6 +1,6 @@
 [package]
 name = "remotehub"
-version = "0.0.1"
+version = "0.0.3"
 edition = "2021"
 
 [build-dependencies]
@@ -15,3 +15,9 @@ portable-pty = "0.8"
 base64 = "0.22"
 parking_lot = "0.12"
 uuid = { version = "1", features = ["v4"] }
+
+# IronRDP client engine: TLS must be enabled explicitly; client does not enforce
+# certificate checks by default, so rdp_engine.rs sets Strict validation.
+ironrdp = { version = "0.17.0", default-features = false, features = ["client", "pdu", "rustls"] }
+ironrdp-tls = { version = "0.2.2", features = ["rustls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
