@@ -256,15 +256,17 @@ impl Engine {
                                             compositor.mark_full();
                                         }
                                         if inflight.is_none() && compositor.has_dirty() {
-                                            sequence=sequence.wrapping_add(1);
-                                            if let Some(patch)=compositor.next_patch(sequence) {
+                                            let next_sequence=sequence.wrapping_add(1);
+                                            if let Some(patch)=compositor.next_patch(next_sequence) {
                                                 let rect=Rect{
                                                     x:patch.x,y:patch.y,width:patch.width,height:patch.height
                                                 };
                                                 if frame_tx.try_send(patch).is_ok(){
+                                                    sequence=next_sequence;
                                                     inflight=Some((sequence,Instant::now()));
                                                 }else{
                                                     // Re-merge the region with later updates, never discard deltas.
+                                                    // Do not advance the sequence for an unsent patch.
                                                     compositor.restore_dirty(rect);
                                                 }
                                             }
