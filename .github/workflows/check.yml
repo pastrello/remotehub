@@ -1,4 +1,7 @@
 name: Windows phase-zero check
+concurrency:
+  group: remotehub-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 on:
   push:
     branches: [main, develop]
@@ -12,6 +15,9 @@ jobs:
         with:
           node-version: '22'
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
       - name: Install JS dependencies
         run: npm install
       - name: Check frontend
