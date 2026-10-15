@@ -176,6 +176,11 @@ async function connect(){
     "Iniciando IronRDP com verificação estrita de certificado...");
   try{
     const id=await invoke<string>("rdp_start",{profileId:profile.id,password,eventId:attempt,allowInvalidCertificate});
+    // A user can close the tab before rdp_start returns. Never leak that session.
+    if(!activeRef.current){
+      await invoke("rdp_close",{id}).catch(()=>{});
+      return;
+    }
     if(!terminatedRef.current){sessionRef.current=id;setSession(id);}
   }catch(_e){
     if(!terminatedRef.current){setPhase("failed");setProgress("Falha ao iniciar o motor RDP. Verifique o perfil.");}
