@@ -14,6 +14,7 @@ function Shell({sid}:{sid:string}){const ref=useRef<HTMLDivElement>(null);useEff
 type RdpEvent = {eventId:string;phase:string;status:string;terminal:boolean};
 function RdpPanel({profile,status}:{profile:Profile;status?:string}) {
 const [password,setPassword]=useState("");
+const [allowInvalidCertificate,setAllowInvalidCertificate]=useState(false);
 const [session,setSession]=useState("");
 const [progress,setProgress]=useState("Nenhuma autenticação RDP confirmada.");
 const [phase,setPhase]=useState("idle");
@@ -43,13 +44,18 @@ async function connect(){
   if(busy||session)return;
   if(!profile.username.trim()){setProgress("Defina o usuário no cadastro RDP.");return;}
   if(!password){setProgress("Informe a senha para autenticação.");return;}
+  if(allowInvalidCertificate && !window.confirm(
+    "ATENÇÃO: o certificado de "+profile.host+" não será validado nesta conexão. "+
+    "Isso permite falsificação de servidor e interceptação das credenciais RDP. "+
+    "Continue somente se você confia na rede e no destino. Deseja conectar?"
+  )){return;}
   const attempt=crypto.randomUUID();
   attemptRef.current=attempt;
   terminatedRef.current=false;
   setBusy(true);setPhase("connecting");
-  setProgress("Iniciando IronRDP com verificação estrita de certificado...");
+  setProgress(allowInvalidCertificate?"Iniciando IronRDP sem verificação da identidade TLS do servidor...":"Iniciando IronRDP com verificação estrita de certificado...");
   try{
-    const id=await invoke<string>("rdp_start",{profileId:profile.id,password,eventId:attempt});
+    const id=await invoke<string>("rdp_start",{profileId:profile.id,password,eventId:attempt,allowInvalidCertificate});
     if(!terminatedRef.current){sessionRef.current=id;setSession(id);}
   }catch(_e){
     if(!terminatedRef.current){setPhase("failed");setProgress("Falha ao iniciar o motor RDP. Verifique dados do perfil.");}
@@ -75,11 +81,19 @@ return <section className="empty" style={{width:"100%"}}>
   <h2>RDP · {profile.name}</h2>
   <p>{profile.host}:{profile.port}</p>
   <p>{status}</p>
-  <p><strong>Motor IronRDP experimental</strong> · TLS com validação estrita do certificado.</p>
+  <p><strong>Motor IronRDP experimental</strong> · {allowInvalidCertificate?"Validação de certificado DESATIVADA nesta tentativa.":"Validação estrita de certificado (padrão)."}</p>
   <p><strong>Estado:</strong> {stage}</p>
   {!session&&!busy?<div style={{maxWidth:330,display:"grid",gap:8}}>
     <p>Usuário: {profile.username||"(não configurado)"}</p>
     <input type="password" autoComplete="off" placeholder="Senha RDP (não será salva)" value={password} onChange={e=>setPassword(e.target.value)}/>
+    <label style={{display:"flex",gap:8,alignItems:"flex-start",cursor:"pointer"}}>
+      <input type="checkbox" style={{width:"auto",marginTop:3,flexShrink:0}} checked={allowInvalidCertificate} onChange={e=>setAllowInvalidCertificate(e.target.checked)}/>
+      <span>Aceitar certificado RDP inválido <strong>(somente nesta tentativa)</strong></span>
+    </label>
+    {allowInvalidCertificate&&<p style={{color:"#fbbf77",fontSize:12,margin:0}}>
+      Atenção: desativa a verificação da identidade do servidor TLS e pode expor as credenciais a interceptação.
+      Use somente em redes e servidores conhecidos.
+    </p>}
     <button disabled={!listenerReady} onClick={()=>void connect()}>Conectar com IronRDP</button>
   </div>:<button disabled={!session} onClick={()=>void disconnect()}>{session?"Desconectar RDP":"Iniciando sessão..."}</button>}
   <p role="status">{progress}</p>
