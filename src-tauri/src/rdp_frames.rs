@@ -16,7 +16,7 @@ pub struct RawFrame {
     pub height: u16,
     pub pixels: Vec<u32>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct FramePacket {
     event_id: String,
