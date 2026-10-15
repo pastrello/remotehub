@@ -110,12 +110,12 @@ fn rdp_negotiate(state: tauri::State<'_, AppState>, profile_id: String) -> Resul
     rdp::probe(&host,port)
 }
 #[tauri::command]
-fn rdp_start(app: tauri::AppHandle, state: tauri::State<'_, AppState>, profile_id: String, password: String, event_id: String) -> Result<String,String> {
+fn rdp_start(app: tauri::AppHandle, state: tauri::State<'_, AppState>, profile_id: String, password: String, event_id: String, allow_invalid_certificate: bool) -> Result<String,String> {
     let (protocol,host,port,username):(String,String,u16,String)=state.db.lock()
        .query_row("SELECT protocol,host,port,username FROM profiles WHERE id=?1",params![profile_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))
        .map_err(|e|e.to_string())?;
     if protocol != "rdp" {return Err("Perfil não é RDP".into());}
-    state.rdp.start(app,host,port,username,password,event_id)
+    state.rdp.start(app,host,port,username,password,event_id,allow_invalid_certificate)
 }
 #[tauri::command]
 fn rdp_close(state: tauri::State<'_, AppState>, id:String) {
