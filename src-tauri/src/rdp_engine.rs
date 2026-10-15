@@ -4,17 +4,68 @@
 use ironrdp::client::{
     config::{ConfigBuilder, Destination},
     output_channel::output_channel,
-    rdp::{RdpClient, RdpInputSender, RdpOutputEvent},
+    rdp::{RdpClient, RdpInputEvent, RdpInputSender, RdpOutputEvent},
 };
 use ironrdp::connector::ConnectorErrorKind;
 use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
+use ironrdp::pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
+use ironrdp::pdu::input::mouse::{MousePdu, PointerFlags};
+use serde::Deserialize;
+use smallvec::smallvec;
+use crate::rdp_frames::{RawFrame, MAX_FPS, MAX_PIXELS};
 use ironrdp_tls::CertificateValidation;
 use parking_lot::Mutex;
 use std::{
     collections::HashMap,
     sync::{atomic::{AtomicBool, Ordering}, Arc},
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter};
+
+#[derive(Debug, Deserialize)]
+#[serde(tag="kind", rename_all="snake_case")]
+pub enum InputAction {
+    Mouse { action: MouseAction, x: u16, y: u16, button: u8, wheel: i16 },
+    Key { scancode: u8, extended: bool, pressed: bool },
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all="snake_case")]
+pub enum MouseAction { Move, Down, Up, Wheel }
+
+fn to_fastpath(input: InputAction) -> Result<FastPathInputEvent, String> {
+    match input {
+        InputAction::Mouse {action,x,y,button,wheel} => {
+            let flags = match action {
+                MouseAction::Move => PointerFlags::MOVE,
+                MouseAction::Wheel => PointerFlags::VERTICAL_WHEEL,
+                MouseAction::Down | MouseAction::Up => {
+                    let button_flag=match button {
+                        0 => PointerFlags::LEFT_BUTTON,
+                        1 => PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
+                        2 => PointerFlags::RIGHT_BUTTON,
+                        _ => return Err("Botão do mouse não suportado".into()),
+                    };
+                    if matches!(action,MouseAction::Down) {button_flag|PointerFlags::DOWN} else {button_flag}
+                }
+            };
+            let rotation=if matches!(action,MouseAction::Wheel) {
+                wheel.clamp(-256,255)
+            }else{0};
+            Ok(FastPathInputEvent::MouseEvent(MousePdu {
+                flags,
+                number_of_wheel_rotation_units:rotation,
+                x_position:x, y_position:y
+            }))
+        }
+        InputAction::Key {scancode,extended,pressed} => {
+            if scancode == 0 { return Err("Código de tecla inválido".into()); }
+            let mut flags=KeyboardFlags::empty();
+            if extended {flags|=KeyboardFlags::EXTENDED;}
+            if !pressed {flags|=KeyboardFlags::RELEASE;}
+            Ok(FastPathInputEvent::KeyboardEvent(flags,scancode))
+        }
+    }
+}
 
 struct SessionHandle {
     sender: RdpInputSender,
@@ -117,6 +168,12 @@ impl Engine {
                 } else {
                     "Iniciando autenticação RDP com certificado TLS verificado"
                 }, false);
+                let (frame_tx, frame_rx) = crate::rdp_frames::bounded_frame_channel();
+                let frame_app = app.clone();
+                let frame_id = event_id.clone();
+                let worker = std::thread::Builder::new()
+                    .name("remotehub-rdp-jpeg".into())
+                    .spawn(move || crate::rdp_frames::process_frames(frame_app,frame_id,frame_rx));
                 let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
                 let outcome = match rt {
                     Ok(rt) => rt.block_on(async {
@@ -124,6 +181,8 @@ impl Engine {
                         // Drive it and its bounded event channel on the same thread.
                         let receive = async {
                             let mut outcome = SessionOutcome::default();
+                            let mut last_frame=Instant::now() - Duration::from_secs(1);
+                            let mut frame_sequence=0_u64;
                             while let Some(event) = output_rx.recv().await {
                                 match event {
                                     RdpOutputEvent::Connected => {
@@ -144,9 +203,22 @@ impl Engine {
                                             outcome.failure = Some("Transporte ou sessão RDP encerrado com erro");
                                         }
                                     }
-                                    RdpOutputEvent::Image { .. } if !outcome.first_image => {
-                                        outcome.first_image = true;
-                                        notify(&app,&event_id,"first_image","Primeiro frame recebido; renderização ainda não implementada",false);
+                                    RdpOutputEvent::Image {buffer,width,height} => {
+                                        if !outcome.first_image {
+                                            outcome.first_image = true;
+                                            notify(&app,&event_id,"first_image","Primeiro frame recebido; renderizando desktop",false);
+                                        }
+                                        // Rate limit and drop frames under encoder pressure rather than
+                                        // blocking the networking/event loop.
+                                        if last_frame.elapsed() >= Duration::from_millis(1000/MAX_FPS)
+                                           && buffer.len() <= MAX_PIXELS {
+                                            frame_sequence=frame_sequence.wrapping_add(1);
+                                            let _=frame_tx.try_send(RawFrame {
+                                                sequence:frame_sequence,width:width.get(),
+                                                height:height.get(),pixels:buffer
+                                            });
+                                            last_frame=Instant::now();
+                                        }
                                     }
                                     _ => {}
                                 }
@@ -161,6 +233,8 @@ impl Engine {
                         ..SessionOutcome::default()
                     },
                 };
+                // Explicitly wait for the encoder to finish and release its bounded queue.
+                if let Ok(worker) = worker { let _ = worker.join(); }
                 let was_closed = close_requested.load(Ordering::Acquire);
                 let (phase, message) = if was_closed {
                     ("closed", "Sessão encerrada a pedido do usuário".to_owned())
@@ -184,6 +258,14 @@ impl Engine {
         Ok(session_id)
     }
 
+    pub fn send_input(&self,id: &str,input: InputAction) -> Result<(),String> {
+        let event=to_fastpath(input)?;
+        let guard=self.sessions.lock();
+        let handle=guard.get(id).ok_or("Sessão RDP não está ativa")?;
+        handle.sender.try_send(RdpInputEvent::FastPath(smallvec![event]))
+            .map_err(|_| "Fila de eventos RDP ocupada ou encerrada".to_owned())
+    }
+
     pub fn close(&self, id: &str) {
         if let Some(handle) = self.sessions.lock().get(id) {
             handle.close_requested.store(true, Ordering::Release);
@@ -201,6 +283,15 @@ mod tests {
             certificate_policy(true),
             CertificateValidation::DangerouslyAcceptInvalidCertificate
         ));
+    }
+    #[test]
+    fn keyboard_release_has_correct_flags() {
+        let event=to_fastpath(InputAction::Key {scancode:0x1c,extended:false,pressed:false}).unwrap();
+        assert!(matches!(event,FastPathInputEvent::KeyboardEvent(f,0x1c) if f.contains(KeyboardFlags::RELEASE)));
+    }
+    #[test]
+    fn invalid_mouse_buttons_rejected() {
+        assert!(to_fastpath(InputAction::Mouse {action:MouseAction::Down,x:1,y:1,button:9,wheel:0}).is_err());
     }
     #[test]
     fn status_classification_never_echoes_passwords() {
