@@ -1,6 +1,6 @@
 [package]
 name = "remotehub"
-version = "0.0.5"
+version = "0.0.6"
 edition = "2021"
 
 [build-dependencies]
@@ -25,3 +25,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"
 # Bounded JPEG encoding for first canvas proof-of-concept.
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 smallvec = "1.13"
+
+# Native SSH file transfers, legacy FTP and OS-native file dialogs.
+ssh2 = "0.9.6"
+suppaftp = "7.0"
+rfd = "0.15"
