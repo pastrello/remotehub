@@ -295,8 +295,8 @@ impl<R:Read,F:FnMut(u64)> Read for ProgressReader<'_,R,F>{
         Ok(n)
     }
 }
-struct ProgressWriter<'a,W,F>{inner:&'a mut W,total:u64,count:u64,callback:F}
-impl<'a,W,F> ProgressWriter<'a,W,F>{fn new(inner:&'a mut W,total:u64,callback:F)->Self{Self{inner,total,count:0,callback}}}
+struct ProgressWriter<'a,W,F>{inner:&'a mut W,total:u64,count:u64,callback:F,last_update:Instant}
+impl<'a,W,F> ProgressWriter<'a,W,F>{fn new(inner:&'a mut W,total:u64,callback:F)->Self{Self{inner,total,count:0,callback,last_update:Instant::now()-Duration::from_secs(1)}}}
 impl<W:Write,F:FnMut(u64)> Write for ProgressWriter<'_,W,F>{
     fn write(&mut self,buf:&[u8])->io::Result<usize>{
         let n=self.inner.write(buf)?;self.count+=n as u64;
