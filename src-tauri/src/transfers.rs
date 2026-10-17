@@ -1,6 +1,6 @@
 //! File transfer sessions: SFTP and SCP over verified SSH; legacy FTP opt-in.
 //! Credentials live only in memory and are never stored in the connection DB.
-use std::{collections::HashMap,fs::{self,File},io::{self,Read,Write},net::{TcpStream,ToSocketAddrs},path::{Path,PathBuf},str::FromStr,sync::Arc,time::Duration};
+use std::{collections::HashMap,fs::{self,File},io::{self,Read,Write},net::{TcpStream,ToSocketAddrs},path::{Path,PathBuf},str::FromStr,sync::Arc,time::{Duration,Instant}};
 use parking_lot::Mutex;
 use serde::Serialize;
 use ssh2::{CheckResult,KnownHostFileKind,OpenFlags,OpenType,Session,Sftp};
@@ -268,18 +268,28 @@ fn verify_host(session:&Session,host:&str,port:u16)->Result<(),String>{
         CheckResult::Failure=>Err("Não foi possível validar a chave SSH do servidor.".into())
     }
 }
-struct ProgressReader<'a,R,F>{inner:&'a mut R,total:u64,count:u64,callback:F}
-impl<'a,R,F> ProgressReader<'a,R,F>{fn new(inner:&'a mut R,total:u64,callback:F)->Self{Self{inner,total,count:0,callback}}}
+struct ProgressReader<'a,R,F>{inner:&'a mut R,total:u64,count:u64,callback:F,last_update:Instant}
+impl<'a,R,F> ProgressReader<'a,R,F>{fn new(inner:&'a mut R,total:u64,callback:F)->Self{Self{inner,total,count:0,callback,last_update:Instant::now()-Duration::from_secs(1)}}}
 impl<R:Read,F:FnMut(u64)> Read for ProgressReader<'_,R,F>{
     fn read(&mut self,buf:&mut [u8])->io::Result<usize>{
-        let n=self.inner.read(buf)?;self.count+=n as u64;(self.callback)(self.count.min(self.total));Ok(n)
+        let n=self.inner.read(buf)?;self.count+=n as u64;
+        if self.last_update.elapsed()>=Duration::from_millis(160){
+            (self.callback)(self.count.min(self.total));
+            self.last_update=Instant::now();
+        }
+        Ok(n)
     }
 }
 struct ProgressWriter<'a,W,F>{inner:&'a mut W,total:u64,count:u64,callback:F}
 impl<'a,W,F> ProgressWriter<'a,W,F>{fn new(inner:&'a mut W,total:u64,callback:F)->Self{Self{inner,total,count:0,callback}}}
 impl<W:Write,F:FnMut(u64)> Write for ProgressWriter<'_,W,F>{
     fn write(&mut self,buf:&[u8])->io::Result<usize>{
-        let n=self.inner.write(buf)?;self.count+=n as u64;(self.callback)(if self.total>0{self.count.min(self.total)}else{self.count});Ok(n)
+        let n=self.inner.write(buf)?;self.count+=n as u64;
+        if self.last_update.elapsed()>=Duration::from_millis(160){
+            (self.callback)(if self.total>0{self.count.min(self.total)}else{self.count});
+            self.last_update=Instant::now();
+        }
+        Ok(n)
     }
     fn flush(&mut self)->io::Result<()> {self.inner.flush()}
 }
