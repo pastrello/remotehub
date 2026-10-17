@@ -224,9 +224,18 @@ impl Transfers {
                 drop(dest);
                 if local.exists(){
                     if !overwrite{return Err("Arquivo local já existe".into());}
-                    fs::remove_file(local).map_err(|e|format!("Sobrescrita local: {e}"))?;
+                    // Preserve the old destination until the new file has been
+                    // safely moved. A failed replacement must not destroy it.
+                    let backup=parent.join(format!(".remotehub-{}.backup",uuid::Uuid::new_v4()));
+                    fs::rename(local,&backup).map_err(|e|format!("Preparar backup local: {e}"))?;
+                    if let Err(e)=fs::rename(&tmp,local){
+                        let _=fs::rename(&backup,local);
+                        return Err(format!("Falha substituindo arquivo local (original preservado): {e}"));
+                    }
+                    let _=fs::remove_file(&backup);
+                }else{
+                    fs::rename(&tmp,local).map_err(|e|format!("Mover arquivo baixado: {e}"))?;
                 }
-                fs::rename(&tmp,local).map_err(|e|format!("Mover arquivo baixado: {e}"))?;
                 Ok(size)
             })();
             if result.is_err(){let _=fs::remove_file(&tmp);}
