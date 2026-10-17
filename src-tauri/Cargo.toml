@@ -28,5 +28,5 @@ smallvec = "1.13"
 
 # Native SSH file transfers, legacy FTP and OS-native file dialogs.
 ssh2 = "0.9.6"
-suppaftp = "7.0"
+suppaftp = "12.1.1"
 rfd = "0.15"
