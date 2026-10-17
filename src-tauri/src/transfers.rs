@@ -156,12 +156,11 @@ impl Transfers {
                     io::copy(&mut wrapped,&mut dest).map_err(|e|format!("Upload SFTP: {e}"))?;
                     dest.flush().map_err(|e|e.to_string())?;
                 }
-                Connection::Scp{ssh,sftp}=>{
-                    // SCP has no portable exclusive-create. SFTP only checks existence.
+                Connection::Scp{ssh,sftp:_}=>{
+                    // SCP cannot guarantee no-clobber, even when a preliminary
+                    // SFTP stat succeeds (TOCTOU race). Require user confirmation.
                     if !overwrite {
-                        if let Some(sftp)=sftp {
-                            if sftp.stat(Path::new(&remote)).is_ok() {return Err("Arquivo remoto já existe; habilite sobrescrita".into());}
-                        } else {return Err("SCP sem SFTP exige habilitar sobrescrita (não é possível testar existência)".into());}
+                        return Err("SCP exige confirmação de sobrescrita; não oferece criação exclusiva atômica".into());
                     }
                     let mut dest=ssh.scp_send(Path::new(&remote),0o644,size,None).map_err(|e|format!("SCP send: {e}"))?;
                     io::copy(&mut wrapped,&mut dest).map_err(|e|format!("SCP upload: {e}"))?;
@@ -172,7 +171,14 @@ impl Transfers {
                 }
                 Connection::Ftp{ftp}=>{
                     if !overwrite {
-                        if ftp.size(&remote).is_ok(){return Err("Arquivo remoto já existe. Confirme sobrescrita.".into());}
+                        // SIZE is optional in FTP, so an error cannot prove absence.
+                        // Use NLST and fail closed when the server cannot list.
+                        let (parent,name)=remote.rsplit_once('/').ok_or("Caminho FTP inválido")?;
+                        ftp.cwd(if parent.is_empty(){"/"}else{parent}).map_err(|e|format!("Diretório remoto: {e}"))?;
+                        let names=ftp.nlst(None).map_err(|_|"Servidor FTP não permite verificar existência. Confirme sobrescrita para prosseguir.".to_owned())?;
+                        if names.iter().any(|p|p.trim_end_matches('/').rsplit('/').next()==Some(name)){
+                            return Err("Arquivo FTP já existe. Confirme sobrescrita.".into());
+                        }
                     }
                     ftp.put_file(remote,&mut wrapped).map_err(|e|format!("Upload FTP: {e}"))?;
                 }
