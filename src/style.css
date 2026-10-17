@@ -11,3 +11,62 @@
 .rdp-screen canvas:focus-visible{outline:2px solid #5499d1;outline-offset:2px}
 .rdp-placeholder{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#75869e;text-align:center;pointer-events:none;white-space:nowrap}
 .rdp-footer{display:flex;gap:12px;flex-wrap:wrap;align-items:center;justify-content:space-between;padding:8px 12px;background:#19283a;font-size:12px}
+
+/* 0.0.6: connection tree and file-transfer explorer (RDP visuals unchanged). */
+.connection-sidebar{padding:0;display:flex;flex-direction:column;flex-shrink:0;overflow:hidden;background:#111922;width:315px}
+.sidebar-heading{display:flex;align-items:center;justify-content:space-between;padding:11px 10px 8px}
+.sidebar-heading small{color:#93a9bf;font-size:10px}
+.connection-sidebar>input{margin:0 8px 8px;width:calc(100% - 16px)}
+.tree-heading{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;background:#1b293a;border-top:1px solid #2f4154;font-weight:600;font-size:12px}
+.tree-heading button{padding:2px 7px;font-size:11px}
+.connection-tree{overflow:auto;flex:1;padding:6px 0}
+.tree-folder,.tree-profile{display:flex;align-items:center;min-height:28px;gap:4px;padding-right:5px;white-space:nowrap}
+.tree-folder:hover,.tree-profile:hover{background:#293e54}
+.tree-chevron{font-size:12px;background:transparent;border:0;width:20px;padding:4px}
+.tree-folder-title,.tree-profile button{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;background:transparent;border:none;padding:3px 0;font-size:12px;flex:1}
+.tree-profile button{color:#cad7e6}
+.tree-folder-title:hover,.tree-profile button:hover,.tree-chevron:hover{background:transparent}
+.folder-icon{margin-right:7px}
+.protocol-dot{color:#75b9e8;font-size:14px;width:15px;text-align:center;flex-shrink:0}
+.protocol-ftp{color:#fbbf77}.protocol-sftp,.protocol-scp{color:#9bd5b0}
+.sidebar-foot{border-top:1px solid #354358;padding:8px 10px;color:#90a0b4;font-size:11px}
+.context-menu{position:fixed;z-index:1000;min-width:218px;max-width:250px;padding:4px;border-radius:5px;border:1px solid #607083;box-shadow:0 12px 32px #0009;background:#172435;display:flex;flex-direction:column}
+.context-menu button{border:none;background:transparent;text-align:left;font-size:12px;padding:8px 9px;width:100%}
+.context-menu button:hover{background:#3a5778}.context-menu hr{border:0;border-top:1px solid #3b495d;width:100%;margin:3px 0}
+.context-menu .danger{color:#f9a4a4}
+.modal-scrim{position:fixed;inset:0;background:#000a;z-index:900;display:flex;justify-content:center;align-items:center}
+.editor-modal{display:grid;gap:10px;padding:20px;width:min(520px,calc(100vw - 40px));background:#172437;border:1px solid #435772;border-radius:9px;box-shadow:0 20px 80px #000c}
+.editor-modal h2{margin:0 0 5px}
+.editor-modal label{display:grid;gap:5px;font-size:12px;color:#b5c6dc}
+.editor-two{display:grid;grid-template-columns:3fr 1fr;gap:8px}
+.editor-actions{display:flex;justify-content:flex-end;gap:8px;padding-top:5px}
+.ftp-warning{color:#f7b974;background:#53392035;border:1px solid #76604a;padding:9px;font-size:12px}
+.folder-dialog{width:min(390px,calc(100vw - 40px))}
+.session-container{flex:1;min-height:0;min-width:0;flex-direction:column}
+.tabs{min-height:38px;align-items:center}
+.tabs .tab{padding:6px 10px;display:flex;align-items:center;gap:9px}
+.tab-protocol{font-size:15px;color:#a5c9e9}
+.tab-close{padding:0 2px;color:#bbc5d0;font-size:16px}
+.tab-close:hover{color:#fff}
+.transfer-panel{flex:1;min-height:0;display:flex;flex-direction:column;background:#111827}
+.transfer-top{display:flex;gap:14px;align-items:center;background:#1e2d3d;padding:7px 12px;min-height:44px}
+.transfer-top button{margin-left:auto}
+.transfer-login{display:grid;gap:10px;margin:24px;max-width:440px}
+.transfer-login h3,.transfer-login p{margin:0}
+.transfer-login button{justify-self:start;min-width:160px}
+.ftp-consent,.overwrite-check{display:flex!important;align-items:center;gap:8px;font-size:12px;color:#e1b47d}
+.ftp-consent input,.overwrite-check input{width:auto}
+.transfer-path{display:flex;gap:6px;padding:9px}
+.transfer-path input{flex:1}
+.transfer-list{flex:1;min-height:100px;overflow:auto;border-top:1px solid #34465b;border-bottom:1px solid #34465b}
+.transfer-head,.transfer-row{display:grid;grid-template-columns:minmax(150px,1fr) 110px;align-items:center;gap:12px;text-align:left}
+.transfer-head{padding:7px 13px;background:#1b2a3a;font-size:12px;color:#8fa3bb;font-weight:600}
+.transfer-row{width:100%;padding:7px 13px;background:transparent;border:0;border-bottom:1px solid #223248;border-radius:0;font-size:12px}
+.transfer-row:hover{background:#2b425a}
+.transfer-row.chosen{background:#3a6185}
+.transfer-row>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.transfer-row>span:last-child{text-align:right;color:#a6bacd}
+.transfer-operations{padding:10px 12px;display:grid;gap:8px}
+.transfer-operations>label:first-child{font-size:12px;display:grid;gap:3px}
+.transfer-buttons{display:flex;flex-wrap:wrap;gap:8px}
+.transfer-status{min-height:35px;display:flex;flex-wrap:wrap;gap:18px;padding:9px 12px;background:#1b2a3a;font-size:12px;color:#cbd8e9}
