@@ -148,7 +148,7 @@ impl Transfers {
             let size=file.metadata().map_err(|e|e.to_string())?.len();
             let mut wrapped=ProgressReader::new(&mut file,size,|n|emit(n,size,false,None));
             match &mut *guard {
-                Connection::Sftp{sftp,..}|Connection::Scp{sftp:Some(sftp),..}=>{
+                Connection::Sftp{sftp,..}=>{
                     let mut flags=OpenFlags::WRITE|OpenFlags::CREATE;
                     if overwrite{flags|=OpenFlags::TRUNCATE;}else{flags|=OpenFlags::EXCLUSIVE;}
                     let mut dest=sftp.open_mode(Path::new(&remote),flags,0o644,OpenType::File)
@@ -156,9 +156,13 @@ impl Transfers {
                     io::copy(&mut wrapped,&mut dest).map_err(|e|format!("Upload SFTP: {e}"))?;
                     dest.flush().map_err(|e|e.to_string())?;
                 }
-                Connection::Scp{ssh,sftp:None}=>{
-                    // Legacy SCP has no portable atomic no-overwrite option.
-                    if !overwrite {return Err("SCP sem SFTP requer confirmação para sobrescrever. Marque 'Sobrescrever'".into());}
+                Connection::Scp{ssh,sftp}=>{
+                    // SCP has no portable exclusive-create. SFTP only checks existence.
+                    if !overwrite {
+                        if let Some(sftp)=sftp {
+                            if sftp.stat(Path::new(&remote)).is_ok() {return Err("Arquivo remoto já existe; habilite sobrescrita".into());}
+                        } else {return Err("SCP sem SFTP exige habilitar sobrescrita (não é possível testar existência)".into());}
+                    }
                     let mut dest=ssh.scp_send(Path::new(&remote),0o644,size,None).map_err(|e|format!("SCP send: {e}"))?;
                     io::copy(&mut wrapped,&mut dest).map_err(|e|format!("SCP upload: {e}"))?;
                     dest.send_eof().map_err(|e|e.to_string())?;
@@ -183,14 +187,14 @@ impl Transfers {
             let result=(||->Result<u64,String>{
                 let mut dest=File::create_new(&tmp).map_err(|e|format!("Criar arquivo temporário: {e}"))?;
                 let (size,total)=match &mut *guard {
-                    Connection::Sftp{sftp,..}|Connection::Scp{sftp:Some(sftp),..}=>{
+                    Connection::Sftp{sftp,..}=>{
                         let mut src=sftp.open(Path::new(&remote)).map_err(|e|format!("Download SFTP: {e}"))?;
                         let total=src.stat().ok().and_then(|s|s.size).unwrap_or(0);
                         let mut wrapped=ProgressWriter::new(&mut dest,total,|n|emit(n,total,false,None));
                         let copied=io::copy(&mut src,&mut wrapped).map_err(|e|format!("Download SFTP: {e}"))?;
                         (copied,total)
                     }
-                    Connection::Scp{ssh,sftp:None}=>{
+                    Connection::Scp{ssh,..}=>{
                         let (mut src,stat)=ssh.scp_recv(Path::new(&remote)).map_err(|e|format!("SCP receive: {e}"))?;
                         let total=stat.size();
                         let mut wrapped=ProgressWriter::new(&mut dest,total,|n|emit(n,total,false,None));
